@@ -1,0 +1,206 @@
+name: RDP
+
+on:
+  workflow_dispatch:
+
+# Evita duas execuções ao mesmo tempo (a nova espera a antiga salvar o checkpoint)
+concurrency:
+  group: rdp
+  cancel-in-progress: false
+
+env:
+  RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+  RCLONE_REMOTE: ${{ secrets.RCLONE_REMOTE }}      # ex: gdrive:RDP-Backup
+  RDP_PASSWORD_SECRET: ${{ secrets.RDP_PASSWORD }} # opcional (senha fixa)
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      # =========================================================
+      # RCLONE + SCRIPT DE SAVE (CHECKPOINT)
+      # =========================================================
+      - name: Setup Rclone and Save Script
+        shell: powershell
+        run: |
+          choco install rclone -y --no-progress | Out-Null
+
+          New-Item -ItemType Directory -Path "$env:APPDATA\rclone" -Force | Out-Null
+          [IO.File]::WriteAllBytes("$env:APPDATA\rclone\rclone.conf", [Convert]::FromBase64String($env:RCLONE_CONF_B64))
+
+          # Exclusões do disco D:
+          Set-Content C:\ex-d.txt -Value @('System Volume Information/**','$RECYCLE.BIN/**','PARAR.txt')
+
+          # Exclusões do perfil (registro/temp/cache não voltam)
+          Set-Content C:\ex-p.txt -Value @('NTUSER.DAT*','ntuser.*','AppData/Local/Temp/**','AppData/Local/Packages/**','AppData/Local/Microsoft/Windows/UsrClass.dat*','AppData/Local/Microsoft/Windows/INetCache/**')
+
+          # Script de save (usado no autosave e no save final)
+          $save = @'
+          $r = $env:RCLONE_REMOTE
+          Write-Host "[$(Get-Date)] Salvando checkpoint..."
+          if (Test-Path "D:\") {
+            rclone sync "D:\" "$r/D" --backup-dir "$r/_lixeira/D" --exclude-from C:\ex-d.txt --ignore-case --ignore-errors --transfers 16 --retries 2
+          }
+          if (Test-Path "C:\Users\ZynexDEX") {
+            rclone sync "C:\Users\ZynexDEX" "$r/Profile" --backup-dir "$r/_lixeira/Profile" --exclude-from C:\ex-p.txt --ignore-case --ignore-errors --transfers 16 --retries 2
+          }
+          Write-Host "[$(Get-Date)] Checkpoint salvo."
+          '@
+          Set-Content C:\save.ps1 -Value $save
+
+      # =========================================================
+      # DISCO VIRTUAL DE 300 GB + RESTAURA D:
+      # =========================================================
+      - name: Create 300GB Virtual Disk and Restore
+        shell: powershell
+        run: |
+          $vhdPath = "C:\RDP-Storage-300GB.vhdx"
+          $diskpartScript = "$env:TEMP\create-vhd.txt"
+
+          if (Test-Path $vhdPath) { Remove-Item $vhdPath -Force }
+
+          Set-Content $diskpartScript -Encoding ASCII -Value @(
+            "create vdisk file=`"$vhdPath`" maximum=307200 type=expandable",
+            "select vdisk file=`"$vhdPath`"",
+            "attach vdisk",
+            "create partition primary",
+            "format fs=ntfs quick label=`"RDP-Storage`"",
+            "assign letter=D",
+            "exit"
+          )
+
+          diskpart /s $diskpartScript
+          Start-Sleep -Seconds 10
+
+          if (-not (Test-Path "D:\")) {
+              Write-Error "Falha ao criar o disco D:"
+              exit 1
+          }
+
+          Write-Host "Restaurando D: do checkpoint..."
+          rclone copy "$env:RCLONE_REMOTE/D" "D:\" --transfers 16 --ignore-errors
+          if ($LASTEXITCODE -eq 3) { Write-Host "Primeira execução (sem checkpoint ainda)." }
+          exit 0
+
+      # =========================================================
+      # CONFIGURAR RDP
+      # =========================================================
+      - name: Configure RDP
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      # =========================================================
+      # USUARIO RDP + RESTAURA PERFIL
+      # =========================================================
+      - name: Create RDP User and Restore Profile
+        shell: powershell
+        run: |
+          $userName = "ZynexDEX"
+
+          if ($env:RDP_PASSWORD_SECRET) {
+              $password = $env:RDP_PASSWORD_SECRET
+          } else {
+              $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+              $password = ""
+              for ($i=0; $i -lt 16; $i++) { $password += $chars[(Get-Random -Maximum $chars.Length)] }
+          }
+
+          if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) { Remove-LocalUser -Name $userName }
+
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $userName -Password $securePass -AccountNeverExpires -FullName "RDP Admin"
+          Add-LocalGroupMember -Group "Administrators" -Member $userName
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $userName
+
+          echo "RDP_USER=$userName" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+
+          # Cria o perfil do usuário (senão o Windows cria ZynexDEX.NOMEPC no primeiro login)
+          $cred = New-Object System.Management.Automation.PSCredential(".\$userName", $securePass)
+          try {
+              Start-Process cmd.exe -ArgumentList "/c exit" -Credential $cred -LoadUserProfile -WorkingDirectory "C:\Windows\System32" -Wait
+          } catch { Write-Host "Aviso ao criar perfil: $_" }
+
+          Write-Host "Restaurando perfil do checkpoint..."
+          rclone copy "$env:RCLONE_REMOTE/Profile" "C:\Users\$userName" --exclude-from C:\ex-p.txt --ignore-case --ignore-errors --transfers 16
+          if ($LASTEXITCODE -eq 3) { Write-Host "Primeira execução (sem perfil salvo)." }
+          exit 0
+
+      # =========================================================
+      # TAILSCALE
+      # =========================================================
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $installerPath = "$env:TEMP\tailscale-setup.msi"
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        shell: powershell
+        run: |
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $tsIP = $null
+          for ($i=0; $i -lt 15; $i++) {
+              $tsIP = & $tsExe ip -4
+              if ($tsIP) { break }
+              Start-Sleep -Seconds 10
+          }
+
+          if (-not $tsIP) { exit 1 }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      # =========================================================
+      # MANTER CONEXÃO + AUTOSAVE (a cada 10 min)
+      # Para encerrar com save: crie o arquivo D:\PARAR.txt
+      # =========================================================
+      - name: Maintain Connection
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host "          RDP SESSION ACTIVE"
+          Write-Host "=========================================="
+          Write-Host "IP: $env:TAILSCALE_IP"
+          Write-Host "User: $env:RDP_USER"
+          Write-Host "Pass: $env:RDP_PASSWORD"
+          Write-Host "=========================================="
+
+          $fim = (Get-Date).AddMinutes(345)
+          $proximoSave = (Get-Date).AddMinutes(10)
+
+          while ((Get-Date) -lt $fim) {
+              if (Test-Path "D:\PARAR.txt") {
+                  Remove-Item "D:\PARAR.txt" -Force
+                  Write-Host "PARAR.txt detectado, encerrando..."
+                  break
+              }
+
+              if ((Get-Date) -ge $proximoSave) {
+                  & C:\save.ps1
+                  $proximoSave = (Get-Date).AddMinutes(10)
+              }
+
+              Start-Sleep -Seconds 30
+          }
+
+      # =========================================================
+      # SAVE FINAL (roda mesmo se cancelar/der timeout)
+      # =========================================================
+      - name: Final Checkpoint
+        if: always()
+        shell: powershell
+        run: |
+          if (Test-Path C:\save.ps1) { & C:\save.ps1 }
