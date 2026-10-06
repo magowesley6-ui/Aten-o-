@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       vnc_password:
-        description: "Senha do VNC (ate 8 caracteres)"
+        description: "Senha do VNC (de 6 a 8 caracteres, ex.: K7m2Xp9q)"
         required: true
       edition:
         description: "Edicao do Zorin (core = o visual da sua foto; lite e mais leve)"
@@ -41,8 +41,11 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -e
+          if [ "${#VNC_PASS}" -lt 6 ]; then
+            echo "ERRO: a senha do VNC precisa ter de 6 a 8 caracteres (ex.: K7m2Xp9q)"
+            exit 1
+          fi
           echo "::add-mask::$VNC_PASS"
-          [ -n "$VNC_PASS" ] || { echo "ERRO: informe a senha do VNC"; exit 1; }
           echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
@@ -205,7 +208,7 @@ jobs:
           fi
           echo "VM online."
 
-      # 6. noVNC + links
+      # 6. noVNC + link
       - name: Start noVNC and tunnel
         run: |
           nohup websockify --web=/usr/share/novnc/ 127.0.0.1:6080 127.0.0.1:5900 \
@@ -315,7 +318,7 @@ jobs:
           fi
           mkdir -p "$HOME/zorin-save"
           rm -f "$HOME/zorin-save/zorin.qcow2.zst"
-          # recria o qcow2 so com o que esta em uso (ignora o espaco vazio)
+          # recria o qcow2 so com o que esta em uso (ignora o espaco vazio de 450 GB)
           qemu-img convert -f qcow2 -O qcow2 -o cluster_size=1M \
             "$HOME/zorin/zorin.qcow2" "$HOME/zorin/zorin-compact.qcow2"
           ls -lh "$HOME/zorin/zorin-compact.qcow2"
