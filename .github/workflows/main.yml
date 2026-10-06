@@ -42,7 +42,7 @@ jobs:
         run: |
           set -e
           if [ "${#VNC_PASS}" -lt 6 ]; then
-            echo "ERRO: a senha do VNC precisa ter de 6 a 8 caracteres (ex.: K7m2Xp9q)"
+            echo "ERRO: a senha recebida tem ${#VNC_PASS} caracteres; precisa ter de 6 a 8 (ex.: K7m2Xp9q)"
             exit 1
           fi
           echo "::add-mask::$VNC_PASS"
