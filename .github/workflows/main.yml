@@ -1,18 +1,23 @@
-name: ExtNoBrasil PC - Zorin OS (noVNC + Salvamento)
+name: ExtNoBrasil PC - Garuda Linux (noVNC + Salvamento)
 
 on:
   workflow_dispatch:
     inputs:
       vnc_password:
-        description: "Senha do VNC (de 6 a 8 caracteres, ex.: K7m2Xp9q)"
+        description: "Senha do VNC (ate 8 caracteres)"
         required: true
       edition:
-        description: "Edicao do Zorin (core = o visual da sua foto; lite e mais leve)"
+        description: "Edicao do Garuda (mokka = o visual da sua foto; xfce e a mais leve)"
         type: choice
         options:
-          - core
-          - lite
-        default: core
+          - mokka
+          - xfce
+          - kde-lite
+          - dr460nized
+          - gnome
+          - cinnamon
+          - dr460nized-gaming
+        default: mokka
       fresh_install:
         description: "Comecar do zero (ignora o save anterior)?"
         type: boolean
@@ -23,13 +28,13 @@ permissions:
   actions: write
 
 jobs:
-  zorin:
+  garuda:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     env:
       DISK: 80G
-      EDITION: ${{ inputs.edition }}
+      ISO_URL: https://iso.builds.garudalinux.org/iso/latest/garuda/${{ inputs.edition }}/latest.iso
       VNC_PASS: ${{ inputs.vnc_password }}
       GH_TOKEN: ${{ github.token }}
       MAX_SECONDS: 19500
@@ -41,11 +46,8 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -e
-          if [ "${#VNC_PASS}" -lt 6 ]; then
-            echo "ERRO: a senha recebida tem ${#VNC_PASS} caracteres; precisa ter de 6 a 8 (ex.: K7m2Xp9q)"
-            exit 1
-          fi
           echo "::add-mask::$VNC_PASS"
+          [ -n "$VNC_PASS" ] || { echo "ERRO: informe a senha do VNC"; exit 1; }
           echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
@@ -56,21 +58,21 @@ jobs:
           chmod +x "$HOME/cloudflared"
 
       # 2. Restaura o disco salvo (se existir)
-      - name: Restore saved Zorin disk
+      - name: Restore saved Garuda disk
         id: restore
         if: ${{ !inputs.fresh_install }}
         uses: actions/cache/restore@v4
         with:
-          path: ~/zorin-save
-          key: zorin-disk-nomatch-${{ github.run_id }}
+          path: ~/garuda-save
+          key: garuda-disk-nomatch-${{ github.run_id }}
           restore-keys: |
-            zorin-disk-
+            garuda-disk-
 
       # 3. KVM, ISO e disco
       - name: Prepare disk, KVM and ISO
         run: |
           set -e
-          mkdir -p "$HOME/zorin" "$HOME/zorin-save"
+          mkdir -p "$HOME/garuda" "$HOME/garuda-save"
 
           # libera espaco em segundo plano
           ( sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
@@ -92,22 +94,12 @@ jobs:
             echo "AVISO: sem KVM (repositorio privado). Vai ficar lento. Deixe o repo PUBLICO."
           fi
 
-          # ISO (tenta 18.1 e depois 18)
-          case "$EDITION" in
-            lite) URLS="https://distro.ibiblio.org/zorinos/18/Zorin-OS-18.1-Lite-64-bit.iso https://distro.ibiblio.org/zorinos/18/Zorin-OS-18-Lite-64-bit.iso" ;;
-            *)    URLS="https://distro.ibiblio.org/zorinos/18/Zorin-OS-18.1-Core-64-bit.iso https://distro.ibiblio.org/zorinos/18/Zorin-OS-18-Core-64-bit.iso" ;;
-          esac
-          ISO_OK=false
-          for U in $URLS; do
-            echo "Baixando $U"
-            rm -f "$HOME/zorin/zorin.iso"
-            aria2c -x 4 -s 4 -k 1M --console-log-level=warn \
-              -d "$HOME/zorin" -o zorin.iso "$U" || true
-            SIZE=$(stat -c%s "$HOME/zorin/zorin.iso" 2>/dev/null || echo 0)
-            if [ "$SIZE" -gt 1000000000 ]; then ISO_OK=true; break; fi
-            echo "Falhou (tamanho: $SIZE). Tentando o proximo link..."
-          done
-          [ "$ISO_OK" = true ] || { echo "ERRO: nao consegui baixar a ISO do Zorin"; exit 1; }
+          # ISO
+          aria2c -x 4 -s 4 -k 1M --console-log-level=warn \
+            -d "$HOME/garuda" -o garuda.iso "$ISO_URL" \
+            || wget -q -O "$HOME/garuda/garuda.iso" "$ISO_URL"
+          SIZE=$(stat -c%s "$HOME/garuda/garuda.iso")
+          [ "$SIZE" -gt 1000000000 ] || { echo "ERRO: ISO incompleta ($SIZE bytes)"; exit 1; }
 
           wait "$CLEAN_PID" || true
           df -h / | tail -1
@@ -123,8 +115,8 @@ jobs:
           sudo sysctl -qw vm.swappiness=10 vm.dirty_ratio=40 vm.dirty_background_ratio=10 || true
 
           # disco: restaura o salvo (se for seguro) ou cria um novo
-          ZST="$HOME/zorin-save/zorin.qcow2.zst"
-          SZ_FILE="$HOME/zorin-save/zorin.size"
+          ZST="$HOME/garuda-save/garuda.qcow2.zst"
+          SZ_FILE="$HOME/garuda-save/garuda.size"
           RESTORE_OK=false
           if [ -f "$ZST" ]; then
             if [ -f "$SZ_FILE" ]; then
@@ -143,17 +135,17 @@ jobs:
           if [ "$RESTORE_OK" = true ]; then
             echo "Save encontrado ($(du -h "$ZST" | cut -f1)): restaurando disco..."
             START_R=$(date +%s)
-            zstd -d --rm -f "$ZST" -o "$HOME/zorin/zorin.qcow2"
+            zstd -d --rm -f "$ZST" -o "$HOME/garuda/garuda.qcow2"
             echo "Disco restaurado em $(( $(date +%s) - START_R ))s"
             echo "RESTORED=true" >> "$GITHUB_ENV"
           else
-            rm -rf "$HOME/zorin-save"/*
+            rm -rf "$HOME/garuda-save"/*
             echo "Criando disco novo."
             qemu-img create -f qcow2 -o lazy_refcounts=on,cluster_size=1M \
-              "$HOME/zorin/zorin.qcow2" "$DISK"
+              "$HOME/garuda/garuda.qcow2" "$DISK"
             echo "RESTORED=false" >> "$GITHUB_ENV"
           fi
-          ls -lh "$HOME/zorin/zorin.qcow2"
+          ls -lh "$HOME/garuda/garuda.qcow2"
 
       # 4. Launcher QEMU
       - name: Create QEMU launcher
@@ -167,7 +159,7 @@ jobs:
           echo "VM_CPUS=$VM_CPUS" >> "$GITHUB_ENV"
           echo "RAM livre: ${AVAIL_MB} MB -> VM com ${VM_RAM_MB} MB, ${VM_CPUS} CPUs"
 
-          cat > "$HOME/zorin/start-zorin.sh" <<EOF
+          cat > "$HOME/garuda/start-garuda.sh" <<EOF
           #!/usr/bin/env bash
           exec qemu-system-x86_64 \\
             -machine q35 \\
@@ -176,26 +168,26 @@ jobs:
             -smp ${VM_CPUS} \\
             -m ${VM_RAM_MB}M \\
             -object iothread,id=io0 \\
-            -drive file=$HOME/zorin/zorin.qcow2,if=none,id=hd0,format=qcow2,cache=writeback,aio=threads,discard=unmap,l2-cache-size=32M \\
+            -drive file=$HOME/garuda/garuda.qcow2,if=none,id=hd0,format=qcow2,cache=writeback,aio=threads,discard=unmap,l2-cache-size=32M \\
             -device virtio-blk-pci,drive=hd0,iothread=io0,num-queues=${VM_CPUS} \\
-            -cdrom $HOME/zorin/zorin.iso \\
+            -cdrom $HOME/garuda/garuda.iso \\
             -boot order=cd,menu=off \\
             -vga std \\
             -device qemu-xhci -device usb-tablet \\
             -object secret,id=vncpw,data=\${VNC_PASS} \\
             -vnc 127.0.0.1:0,password-secret=vncpw \\
-            -monitor unix:$HOME/zorin/monitor.sock,server,nowait \\
+            -monitor unix:$HOME/garuda/monitor.sock,server,nowait \\
             -netdev user,id=net0 \\
             -device virtio-net-pci,netdev=net0 \\
             -device virtio-balloon-pci \\
             -rtc base=localtime
           EOF
-          chmod +x "$HOME/zorin/start-zorin.sh"
+          chmod +x "$HOME/garuda/start-garuda.sh"
 
       # 5. Inicia a VM
-      - name: Start Zorin VM
+      - name: Start Garuda VM
         run: |
-          nohup "$HOME/zorin/start-zorin.sh" > "$HOME/zorin/qemu.log" 2>&1 &
+          nohup "$HOME/garuda/start-garuda.sh" > "$HOME/garuda/qemu.log" 2>&1 &
           echo "VM_STARTED=true" >> "$GITHUB_ENV"
           for i in $(seq 1 20); do
             sleep 2
@@ -203,7 +195,7 @@ jobs:
           done
           if ! pgrep -f qemu-system-x86_64 >/dev/null || ! ss -ltn | grep -q "127.0.0.1:5900"; then
             echo "ERRO: QEMU nao iniciou"
-            cat "$HOME/zorin/qemu.log"
+            cat "$HOME/garuda/qemu.log"
             exit 1
           fi
           echo "VM online."
@@ -212,20 +204,20 @@ jobs:
       - name: Start noVNC and tunnel
         run: |
           nohup websockify --web=/usr/share/novnc/ 127.0.0.1:6080 127.0.0.1:5900 \
-            > "$HOME/zorin/novnc.log" 2>&1 &
+            > "$HOME/garuda/novnc.log" 2>&1 &
           sleep 3
           nohup "$HOME/cloudflared" tunnel --url http://127.0.0.1:6080 --no-autoupdate \
-            > "$HOME/zorin/cloudflare.log" 2>&1 &
+            > "$HOME/garuda/cloudflare.log" 2>&1 &
 
           URL=""
           for i in $(seq 1 40); do
             sleep 2
-            URL="$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$HOME/zorin/cloudflare.log" | grep -v '^https://api\.' | tail -n1)"
-            if [ -n "$URL" ] && grep -q "Registered tunnel connection" "$HOME/zorin/cloudflare.log"; then
+            URL="$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "$HOME/garuda/cloudflare.log" | grep -v '^https://api\.' | tail -n1)"
+            if [ -n "$URL" ] && grep -q "Registered tunnel connection" "$HOME/garuda/cloudflare.log"; then
               break
             fi
           done
-          [ -n "$URL" ] || { echo "ERRO: link do Cloudflare nao gerado"; cat "$HOME/zorin/cloudflare.log"; exit 1; }
+          [ -n "$URL" ] || { echo "ERRO: link do Cloudflare nao gerado"; cat "$HOME/garuda/cloudflare.log"; exit 1; }
 
           # espera o link responder de fato (o DNS do Cloudflare demora uns segundos)
           for i in $(seq 1 30); do
@@ -240,115 +232,26 @@ jobs:
           ( tail -f /dev/null | nohup ssh -o StrictHostKeyChecking=no \
               -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes \
               -R 80:127.0.0.1:6080 nokey@localhost.run \
-              > "$HOME/zorin/lhr.log" 2>&1 ) &
+              > "$HOME/garuda/lhr.log" 2>&1 ) &
           ALT=""
           for i in $(seq 1 15); do
             sleep 2
-            ALT="$(grep -oE 'https://[a-zA-Z0-9]+\.lhr\.life' "$HOME/zorin/lhr.log" | tail -n1)"
+            ALT="$(grep -oE 'https://[a-zA-Z0-9]+\.lhr\.life' "$HOME/garuda/lhr.log" | tail -n1)"
             [ -n "$ALT" ] && break
           done
           [ -n "$ALT" ] || ALT="(nao gerado)"
 
           echo "=============================================="
-          echo "  EXT NOBRASIL PC - ZORIN OS"
+          echo "  EXT NOBRASIL PC - GARUDA LINUX"
           echo "  Abra: $URL/vnc.html"
           echo "  Link reserva: $ALT/vnc.html"
           echo "  Senha: a que voce digitou ao rodar"
           echo "  ${VM_CPUS} vCPU | ${VM_RAM_MB} MB RAM | ${DISK} disco | ${ACCEL%%,*}"
           echo "  Disco restaurado do save: ${RESTORED}"
-          echo "  PRA SALVAR: desligue o Zorin por dentro (menu > Sair > Desligar)."
+          echo "  PRA SALVAR: desligue o Garuda por dentro (menu > Sair > Desligar)."
           echo "=============================================="
 
       # 7. Mantem online ate desligar, cair ou chegar perto do limite
-      - name: Keep alive
-        run: |
-          # se voce cancelar a execucao, ja pede o desligamento do Zorin na hora
-          on_cancel() {
-            echo "Cancelamento detectado: pedindo desligamento ao Zorin..."
-            touch "$HOME/zorin/powerdown_sent"
-            echo system_powerdown | socat - UNIX-CONNECT:"$HOME/zorin/monitor.sock" || true
-            exit 0
-          }
-          trap on_cancel INT TERM
-
-          COUNT=0
-          while true; do
-            NOW=$(date +%s)
-            if [ $((NOW - START_TS)) -ge "$MAX_SECONDS" ]; then
-              echo "Perto do limite de 6h: encerrando e salvando."
-              break
-            fi
-            pgrep -f qemu-system-x86_64 >/dev/null || { echo "VM desligada: indo salvar."; break; }
-            pgrep -f cloudflared >/dev/null || { echo "Tunel caiu: encerrando e salvando."; break; }
-            if [ $((COUNT % 15)) -eq 0 ]; then
-              echo "[$(date '+%H:%M:%S')] online - $NOVNC_URL/vnc.html | aceleracao: ${ACCEL%%,*} | CPU do QEMU: $(ps -o %cpu= -C qemu-system-x86_64 | head -1)%"
-            fi
-            COUNT=$((COUNT + 1))
-            sleep 20 & wait $!
-          done
-
-      # 8. Desliga a VM com seguranca (tambem roda se voce cancelar)
-      - name: Shutdown VM safely
-        if: always() && env.VM_STARTED == 'true'
-        run: |
-          if pgrep -f qemu-system-x86_64 >/dev/null; then
-            if [ ! -f "$HOME/zorin/powerdown_sent" ]; then
-              echo "Pedindo desligamento ao Zorin..."
-              echo system_powerdown | socat - UNIX-CONNECT:"$HOME/zorin/monitor.sock" || true
-            fi
-            for i in $(seq 1 30); do
-              pgrep -f qemu-system-x86_64 >/dev/null || break
-              sleep 2
-            done
-            if pgrep -f qemu-system-x86_64 >/dev/null; then
-              echo "Zorin nao desligou a tempo: fechando a VM a forca."
-              echo quit | socat - UNIX-CONNECT:"$HOME/zorin/monitor.sock" || true
-              sleep 5
-            fi
-          fi
-          pgrep -f qemu-system-x86_64 >/dev/null && echo "AVISO: QEMU ainda ativo" || echo "VM parada."
-
-      # 9. Compacta o disco
-      - name: Compress disk
-        if: always() && env.VM_STARTED == 'true'
-        run: |
-          if pgrep -f qemu-system-x86_64 >/dev/null; then
-            echo "QEMU ainda ativo: nao vou salvar pra nao corromper."
-            exit 0
-          fi
-          mkdir -p "$HOME/zorin-save"
-          rm -f "$HOME/zorin-save/zorin.qcow2.zst"
-          # recria o qcow2 so com o que esta em uso (ignora o espaco vazio de 450 GB)
-          qemu-img convert -f qcow2 -O qcow2 -o cluster_size=1M \
-            "$HOME/zorin/zorin.qcow2" "$HOME/zorin/zorin-compact.qcow2"
-          ls -lh "$HOME/zorin/zorin-compact.qcow2"
-          zstd -T0 -1 -f "$HOME/zorin/zorin-compact.qcow2" -o "$HOME/zorin-save/zorin.qcow2.zst"
-          stat -c%s "$HOME/zorin/zorin-compact.qcow2" > "$HOME/zorin-save/zorin.size"
-          ls -lh "$HOME/zorin-save/zorin.qcow2.zst"
-          SIZE=$(stat -c%s "$HOME/zorin-save/zorin.qcow2.zst")
-          if [ "$SIZE" -gt 9800000000 ]; then
-            echo "ERRO: save com $((SIZE/1000000)) MB passa do limite de 10 GB do cache. Nao vou salvar."
-            exit 0
-          fi
-          echo "SAVE_READY=true" >> "$GITHUB_ENV"
-
-      # 10. Salva no cache do GitHub
-      - name: Save disk to cache
-        id: save
-        if: always() && env.SAVE_READY == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/zorin-save
-          key: zorin-disk-${{ github.run_id }}-${{ github.run_attempt }}
-
-      # 11. Apaga saves antigos (mantem so o mais novo)
-      - name: Delete older saves
-        if: always() && steps.save.outcome == 'success'
-        run: |
-          gh cache list --repo "$GITHUB_REPOSITORY" --key zorin-disk- \
-            --sort created_at --order desc --limit 50 --json id --jq '.[1:][].id' \
-            | xargs -r -n1 gh cache delete --repo "$GITHUB_REPOSITORY" || true
-          echo "Save concluido."ntem online ate desligar, cair ou chegar perto do limite
       - name: Keep alive
         run: |
           # se voce cancelar a execucao, ja pede o desligamento do Garuda na hora
